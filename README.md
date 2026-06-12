@@ -34,15 +34,32 @@ dedicated experiment:
     conda activate qcga-leo-uav
     python experiments/smoke_test.py
 
-## Status / TODO
+## Findings so far (honest)
 
-- [x] Sparse CGA engine + scenario + QPSO + CGA-vs-Euclidean smoke test.
-- [ ] **Fair Euclidean baseline**: bounded incremental waypoints (not absolute) so
-      the comparison isolates convergence/quality, not a trivial feasibility win.
+1. Position-only trajectory (smoke): with a FAIR Euclidean baseline, CGA gives no
+   advantage (extra rotational DoF are dead weight). `smoke_test.py`.
+2. Equivariance under scene rotation: CGA only marginally more rotation-stable, not
+   better on quality. `equivariance_test.py`.
+3. Warm-start across rotation: retired. The problem's only symmetry is yaw (anisotropic
+   UAV kinematics), where Euler is also singularity-free, so no gap to exploit.
+   `warmstart_test.py` (superseded).
+4. **The real win.** When good solutions need steep near-nadir / near-zenith pointing
+   (UAV serving ground users, or tracking an overhead LEO) the singularity-free rotor
+   pose parameterization beats minimal Euler angles by ~50% in coverage objective and
+   converges faster, at equal budget and fair angle scaling. `attitude_param_test.py`:
+   CGA 135.5 +/- 8.6 vs Euler 89.0 +/- 7.4 (5 seeds). NOTE: quaternions share this
+   benefit (unit quaternion = rotor); the CGA contribution is UNIFYING this with the
+   conformal constraint algebra and motions, not the gimbal-lock observation itself.
+
+## TODO
+
+- [x] Fair Euclidean baseline; fair Euler angle scaling.
+- [x] Locate a genuine, mechanism-backed CGA advantage (steep-pointing attitude search).
+- [ ] Reframe paper around the honest steep-pointing result (see strategy notes).
 - [ ] 3GPP TR 38.811 NTN path loss (UAV-LEO) + air-to-ground access model.
 - [ ] Multi-LEO association + handover penalty + backhaul capacity.
-- [ ] SE(3)-equivariance theorem + invariance experiment.
-- [ ] Rigorous baselines: well-tuned GA (genetic), PSO, DE, CMA-ES, L-SHADE, SCA.
+- [ ] Quaternion baseline (to show CGA matches it) + show CGA's added constraint-algebra value.
+- [ ] Rigorous baselines: well-tuned Genetic Algorithm, PSO, DE, CMA-ES, L-SHADE, SCA.
 - [ ] Prior-art / novelty deep-research pass before writing related work.
 
 Note: in this work "GA" always means **Geometric Algebra**; the genetic-algorithm
