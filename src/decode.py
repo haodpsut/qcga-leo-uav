@@ -96,13 +96,79 @@ def euclid_incr_decode(params, scn):
     return pos
 
 
-def fitness(traj, scn, feas_penalty=50.0):
+def cga_decode_pose(params, scn):
+    """Like cga_decode but also returns the UAV pointing direction per slot.
+
+    The pointing direction is the accumulated heading applied to the body forward
+    axis e_x, so heading is an intrinsic part of the motor composition (no separate
+    Euler parameterization). Returns (traj (B,M,N,3), pdir (B,M,N,3)).
+    """
+    B = params.shape[0]
+    M, N = scn.M, scn.N
+    dev, dt = params.device, params.dtype
+    p = params.view(B, M, N, 6)
+
+    start = scn.start.to(dev, dt)
+    pos = torch.zeros(B, M, N, 3, device=dev, dtype=dt)
+    pdir = torch.zeros(B, M, N, 3, device=dev, dtype=dt)
+    pos[:, :, 0, :] = start.view(1, M, 3)
+    fwd = torch.tensor([1.0, 0.0, 0.0], device=dev, dtype=dt)
+
+    R_acc = torch.eye(3, device=dev, dtype=dt).expand(B, M, 3, 3).contiguous()
+    pdir[:, :, 0, :] = fwd.view(1, 1, 3)
+    turn_max, dz_max = 0.6, 30.0
+    for n in range(1, N):
+        w = p[:, :, n, 0:3]
+        wn = torch.linalg.norm(w, dim=-1, keepdim=True).clamp_min(1e-9)
+        w = w * (turn_max * torch.tanh(wn / turn_max) / wn)
+        R_acc = cga.rotation3(w) @ R_acc
+        t_body = p[:, :, n, 3:6]
+        disp = torch.einsum("bmij,bmj->bmi", R_acc, t_body)
+        horiz = disp[..., :2]
+        hn = torch.linalg.norm(horiz, dim=-1, keepdim=True).clamp_min(1e-9)
+        horiz = horiz * (scn.v_max * torch.tanh(hn / scn.v_max) / hn)
+        dz = dz_max * torch.tanh(disp[..., 2:3] / dz_max)
+        pos[:, :, n, :] = pos[:, :, n - 1, :] + torch.cat([horiz, dz], dim=-1)
+        pdir[:, :, n, :] = torch.einsum("bmij,j->bmi", R_acc, fwd)
+    return pos, pdir
+
+
+def euclid_incr_decode_pose(params, scn):
+    """Fair directional Euclidean baseline: bounded position increment + raw pointing.
+
+    params (B, M*N*6): per slot, 3 world-frame position increments (clamped to the
+    same kinematic envelope) and 3 raw pointing components (normalized). The pointing
+    is a free world-frame vector, NOT tied to the motion -- this is the non-geometric
+    counterpart to the CGA motor whose heading and translation are one object.
+    Returns (traj, pdir).
+    """
+    B = params.shape[0]
+    M, N = scn.M, scn.N
+    dev, dt = params.device, params.dtype
+    p = params.view(B, M, N, 6)
+    dz_max = 30.0
+
+    pos = torch.zeros(B, M, N, 3, device=dev, dtype=dt)
+    pos[:, :, 0, :] = scn.start.to(dev, dt).view(1, M, 3)
+    for n in range(1, N):
+        disp = p[:, :, n, 0:3]
+        horiz = disp[..., :2]
+        hn = torch.linalg.norm(horiz, dim=-1, keepdim=True).clamp_min(1e-9)
+        horiz = horiz * (scn.v_max * torch.tanh(hn / scn.v_max) / hn)
+        dz = dz_max * torch.tanh(disp[..., 2:3] / dz_max)
+        pos[:, :, n, :] = pos[:, :, n - 1, :] + torch.cat([horiz, dz], dim=-1)
+    pdir = p[..., 3:6]
+    pdir = pdir / torch.linalg.norm(pdir, dim=-1, keepdim=True).clamp_min(1e-9)
+    return pos, pdir
+
+
+def fitness(traj, scn, feas_penalty=50.0, point_dir=None):
     """Penalized fitness for the optimizer + raw metrics for reporting.
 
     Returns (fit (B,), info dict). The penalty pushes the optimizer toward feasible
     trajectories without hard-rejecting them.
     """
-    out = scn.evaluate(traj)
+    out = scn.evaluate(traj, point_dir=point_dir)
     # Soft penalties mirror the hard feasibility flags reported in `out`.
     steps = traj[:, :, 1:, :] - traj[:, :, :-1, :]
     path = torch.linalg.norm(steps[..., :2], dim=-1)

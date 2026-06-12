@@ -8,6 +8,8 @@ All evaluation is batched over a population of candidate solutions so the optimi
 can score the whole swarm in one forward pass (CUDA-friendly).
 """
 
+import copy
+
 import torch
 
 import cga
@@ -15,7 +17,8 @@ import cga
 
 class Scenario:
     def __init__(self, n_users=10, n_uav=2, n_slots=8, area=2000.0, alt=300.0,
-                 cov_radius=600.0, v_max=120.0, seed=0):
+                 cov_radius=600.0, v_max=120.0, seed=0,
+                 directional=False, cone_deg=60.0):
         g = torch.Generator().manual_seed(seed)
         self.K = n_users
         self.M = n_uav
@@ -24,6 +27,12 @@ class Scenario:
         self.alt = alt
         self.cov_radius = cov_radius  # ground coverage radius of a UAV cell [m]
         self.v_max = v_max            # max horizontal displacement per slot [m]
+        # Directional coverage: a UAV serves a user only if the user lies inside the
+        # pointing cone (half-angle cone_deg) as well as within range. This makes the
+        # UAV heading a real decision variable, so a global rotation of the scene
+        # genuinely matters -- the regime where SE(3)-equivariance can pay off.
+        self.directional = directional
+        self.cone_cos = torch.cos(torch.deg2rad(torch.tensor(cone_deg)))
 
         # Ground users on a square; z = 0.
         xy = (torch.rand(n_users, 2, generator=g) - 0.5) * 2 * area
@@ -45,16 +54,36 @@ class Scenario:
         self.min_elev_cos = torch.cos(torch.deg2rad(torch.tensor(25.0)))  # 25 deg mask
         self.backhaul_cap = 50.0  # aggregate rate cap per UAV via LEO [bps/Hz units]
 
+    def yaw_rotated(self, angle_rad):
+        """Return a copy of this scenario with all geometry rotated by yaw about z.
+
+        This is the global SE(3) action (restricted to ground-plane rotation, the
+        physically meaningful symmetry since z is up) used for the equivariance study.
+        """
+        a = torch.as_tensor(angle_rad, dtype=torch.get_default_dtype())
+        c, s = torch.cos(a), torch.sin(a)
+        Rz = torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+        new = copy.deepcopy(self)
+        new.users = self.users @ Rz.T
+        new.user_pts = cga.point(new.users)
+        new.start = self.start @ Rz.T
+        new.nofly_c = self.nofly_c @ Rz.T
+        new.nofly = cga.sphere(new.nofly_c, self.nofly_r)
+        new.leo_dir = self.leo_dir @ Rz.T
+        return new
+
     # ---- coverage sphere of a UAV given its 3D position --------------------
     def _cov_sphere(self, pos):
         """pos (..., 3) -> IPNS coverage sphere (..., 5) of radius cov_radius."""
         r = torch.full(pos.shape[:-1], self.cov_radius, device=pos.device, dtype=pos.dtype)
         return cga.sphere(pos, r)
 
-    def evaluate(self, traj):
+    def evaluate(self, traj, point_dir=None):
         """Score a batch of trajectories.
 
         traj: (B, M, N, 3) UAV positions per slot.
+        point_dir: (B, M, N, 3) UAV pointing directions, required if directional.
         Returns dict with objective (B,) and feasibility mask (B,).
         """
         B = traj.shape[0]
@@ -68,6 +97,15 @@ class Scenario:
         cov = cga.inner(user_pts.view(1, 1, 1, self.K, 5),
                         S.unsqueeze(-2))           # (B, M, N, K)
         inside = cov >= 0
+
+        # Directional gating: user must also lie inside the UAV pointing cone.
+        if self.directional:
+            assert point_dir is not None, "directional scenario needs point_dir"
+            rel = users.view(1, 1, 1, self.K, 3) - traj.unsqueeze(-2)  # (B,M,N,K,3)
+            rel = rel / torch.linalg.norm(rel, dim=-1, keepdim=True).clamp_min(1e-9)
+            pd = point_dir / torch.linalg.norm(point_dir, dim=-1, keepdim=True).clamp_min(1e-9)
+            align = (pd.unsqueeze(-2) * rel).sum(-1)          # (B,M,N,K) cos angle
+            inside = inside & (align >= self.cone_cos.to(dev, dt))
 
         # Distance-based SNR proxy: SNR ~ 1 / (dist^2). dist user-UAV.
         d2 = ((traj.unsqueeze(-2) - users.view(1, 1, 1, self.K, 3)) ** 2).sum(-1)  # (B,M,N,K)
