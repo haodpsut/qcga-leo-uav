@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+results/
+*.pt
+*.npz
+.venv/
+*.aux
+*.log
+*.out
+*.synctex.gz
+paper/*.pdf
