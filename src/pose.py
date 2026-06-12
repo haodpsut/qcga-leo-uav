@@ -129,6 +129,40 @@ def euclid_fullpose_decode(params, scn, Rleft=None):
     return pos, Rloc
 
 
+def quat_to_R(q):
+    """Unit-quaternion (..., 4) [w,x,y,z] -> rotation matrix (..., 3, 3)."""
+    q = q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp_min(1e-9)
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = torch.zeros(q.shape[:-1] + (3, 3), device=q.device, dtype=q.dtype)
+    R[..., 0, 0] = 1 - 2 * (y * y + z * z)
+    R[..., 0, 1] = 2 * (x * y - z * w)
+    R[..., 0, 2] = 2 * (x * z + y * w)
+    R[..., 1, 0] = 2 * (x * y + z * w)
+    R[..., 1, 1] = 1 - 2 * (x * x + z * z)
+    R[..., 1, 2] = 2 * (y * z - x * w)
+    R[..., 2, 0] = 2 * (x * z - y * w)
+    R[..., 2, 1] = 2 * (y * z + x * w)
+    R[..., 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
+
+
+def quat_fullpose_decode(params, scn, Rleft=None):
+    """params (B, M*N*7) -> (pos, R). Attitude = absolute unit quaternion per slot.
+
+    A unit quaternion is the spin representation of a rotor in Cl(3,0); this baseline
+    exists to check that the singularity-free pose win is shared with quaternions (i.e.
+    it is a geometric-algebra-family property, not specific to the conformal model).
+    """
+    B, M, N = params.shape[0], scn.M, scn.N
+    p = params.view(B, M, N, 7)
+    pos = _bounded_positions(p[..., 0:3], scn)
+    R = quat_to_R(p[..., 3:7])
+    if Rleft is not None:
+        Rl = Rleft.to(p.device, p.dtype).reshape(Rleft.shape[0], M, 1, 3, 3)
+        R = Rl @ R
+    return pos, R
+
+
 def elliptical_quality(scn, pos, R, ang_y=0.9, ang_z=0.35):
     """Objective with an elliptical beam: orientation (incl. roll) matters.
 
@@ -158,3 +192,27 @@ def elliptical_quality(scn, pos, R, ang_y=0.9, ang_z=0.35):
     steps = pos[:, :, 1:, :] - pos[:, :, :-1, :]
     energy = torch.linalg.norm(steps[..., :2], dim=-1).sum(dim=(-1, -2))
     return access - 0.002 * energy
+
+
+def nofly_penalty(scn, pos, mode="cga"):
+    """No-fly-sphere violation penalty for UAV positions (B,M,N,3) -> (B,).
+
+    mode="cga": test via the conformal inner product <P, S> (>0 means inside, illegal).
+    mode="vec": test via plain Euclidean 0.5*(r^2 - |x-c|^2). The two are algebraically
+    identical; we expose both to demonstrate the CGA constraint layer is a notational
+    unification, not a different (or better) computation.
+    """
+    dev, dt = pos.device, pos.dtype
+    if mode == "cga":
+        P = cga.point(pos)                                   # (B,M,N,5)
+        val = cga.inner(P, scn.nofly.to(dev, dt).view(1, 1, 1, 5))  # 0.5(r^2-|x-c|^2)
+    else:
+        c = scn.nofly_c.to(dev, dt).view(1, 1, 1, 3)
+        r2 = (scn.nofly_r.to(dev, dt) ** 2).view(1, 1, 1)
+        val = 0.5 * (r2 - ((pos - c) ** 2).sum(-1))
+    return val.clamp_min(0.0).sum(dim=(-1, -2))              # penalize inside (val>0)
+
+
+def constrained_quality(scn, pos, R, w_nofly=0.01, mode="cga"):
+    """Elliptical coverage minus the no-fly penalty. Used for the constraint-layer test."""
+    return elliptical_quality(scn, pos, R) - w_nofly * nofly_penalty(scn, pos, mode=mode)
