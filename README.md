@@ -34,6 +34,18 @@ dedicated experiment:
     conda activate qcga-leo-uav
     python experiments/smoke_test.py
 
+## VERDICT (2026-06-12): parked — no Transactions-grade quantitative contribution
+
+After exhaustive honest testing, this direction does not yield a defensible method-paper
+result: (1) CGA is notation only (= quaternion pose, = vector-algebra constraints to
+1e-11); (2) singularity-free attitude is known since 1982/2005 and helps only in steep
+nadir/zenith edge cases; (3) on the full joint LEO-UAV problem the quantum-inspired QPSO
+ties or loses to GWO/DE/GA with no robust win across scales (incumbent GWO best at the
+largest scale); (4) the 3-way combination is novel only as framing. Prior-art deep
+research confirmed each pillar is occupied. Decision: stop; redirect effort to stronger
+portfolio papers. Codebase (CGA engine, joint scenario, 5 solvers, 6 experiments) is
+reusable. Full reasoning trail below.
+
 ## Findings so far (honest)
 
 1. Position-only trajectory (smoke): with a FAIR Euclidean baseline, CGA gives no
