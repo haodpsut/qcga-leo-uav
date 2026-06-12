@@ -35,8 +35,9 @@ def run(seed=0, device="cpu"):
 
     res_cga = qpso(dim_cga, make_eval(decode.cga_decode),
                    lo=-150.0, hi=150.0, seed=seed, device=device)
-    res_euc = qpso(dim_euc, make_eval(decode.euclid_decode),
-                   lo=-2000.0, hi=2000.0, seed=seed, device=device)
+    # Fair baseline: bounded world-frame increments, same kinematic envelope as CGA.
+    res_euc = qpso(dim_euc, make_eval(decode.euclid_incr_decode),
+                   lo=-150.0, hi=150.0, seed=seed, device=device)
     return scn, res_cga, res_euc
 
 
